@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE ForeignFunctionInterface #-}
 #if __GLASGOW_HASKELL__ >= 701
 {-# LANGUAGE Trustworthy #-}
 #endif
@@ -68,6 +69,7 @@ module Data.Binary (
     , encodeFile                -- :: Binary a => FilePath -> a -> IO ()
     , decodeFile                -- :: Binary a => FilePath -> IO a
     , decodeFileOrFail
+    , decodeResource            -- :: Binary a => FilePath -> IO a
 
     , module Data.Word -- useful
 
@@ -87,6 +89,13 @@ import Data.ByteString.Lazy (ByteString)
 import qualified Data.ByteString.Lazy as L
 import qualified Data.ByteString.Lazy.Internal as L ( defaultChunkSize )
 import System.IO ( withBinaryFile, IOMode(ReadMode) )
+#if defined(INTERACTIVE_EDITION) && defined(USE_FIXUPS)
+import Foreign.C
+import Foreign.Ptr
+import Foreign.ForeignPtr
+import Data.ByteString.Internal (fromForeignPtr)
+import Data.ByteString.Lazy (ByteString, fromChunks)
+#endif
 
 ------------------------------------------------------------------------
 
@@ -226,6 +235,30 @@ decodeFileOrFail f =
       case B.length chunk of
         0 -> feed (k Nothing) h
         _ -> feed (k (Just chunk)) h
+
+decodeResource :: Binary a => FilePath -> IO a
+#if defined(INTERACTIVE_EDITION) && defined(USE_FIXUPS)
+foreign import ccall "resources.h getLen" c_getLen::CString -> IO CInt
+foreign import ccall "resources.h getContent" c_getContent::CString -> IO (Ptr Word8)
+foreign import ccall "resources.h &finalizerNull" finalizerNull :: FinalizerPtr a
+
+getResourceAsByteString :: FilePath -> IO ByteString
+getResourceAsByteString fn = do
+       len <- (withCString fn $ \cfn -> c_getLen cfn)
+       content <- (withCString fn $ \cfn -> c_getContent cfn)
+       contentfp <- newForeignPtr finalizerNull content
+       let sbs = fromForeignPtr contentfp 0 (fromIntegral len)
+       let lbs = fromChunks [sbs]
+       return lbs
+
+decodeResource f = do
+    s <- getResourceAsByteString f
+    return $ runGet (do v <- get
+                        m <- isEmpty
+                        m `seq` return v) s
+#else
+decodeResource = decodeFile
+#endif
 
 ------------------------------------------------------------------------
 -- $generics
